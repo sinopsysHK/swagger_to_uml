@@ -21,6 +21,7 @@
 import json
 import sys
 from typing import List, Optional, Any, Set
+from collections import defaultdict
 
 
 def resolve_ref(ref):
@@ -180,14 +181,29 @@ class Property:
 
 
 class Definition:
+    _all_definitions = defaultdict(list)
     def __init__(self, name, type, properties, relationships):
         self.name = name  # type: str
         self.type = type  # type: str
         self.properties = properties  # type: List[Property]
         self.relationships = relationships  # type: Set[str]
+        Definition._all_definitions[name].append(self)
 
     @staticmethod
     def from_dict(name, d):
+        if 'allOf' in d:
+            return AllOfDefinition(
+                name=name,
+                type='allOf',
+                allOf = [ Definition.from_dict("_{}-{}".format(name, idx), d) for idx, d in enumerate(d['allOf']) ] 
+            )
+        elif '$ref' in d:
+            return RefDefinition(
+                name=name,
+                type='ref',
+                ref_type=resolve_ref(d['$ref'])
+            )
+        
         properties = []  # type: List[Property]
         for property_name, property in d.get('properties', {}).items():
             properties.append(Property.from_dict(
@@ -198,6 +214,12 @@ class Definition:
 
         if not 'type' in d:
             print('required key "type" not found in dictionary ' + json.dumps(d), file=sys.stderr)
+            if 'properties' in d:
+                print('assume it is an object', file=sys.stderr)
+                return Definition(name=name,
+                          type='object',
+                          properties=properties,
+                          relationships={property.ref_type for property in properties if property.ref_type})
 
         return Definition(name=name,
                           type=d['type'],
@@ -220,6 +242,59 @@ class Definition:
 
         return result
 
+class AllOfDefinition(Definition):
+    def __init__(self, name, type, allOf):
+        self.name = name  # type: str
+        self.type = type  # type: str
+        self.allOf = allOf  # type: List[Definition]
+        Definition._all_definitions[name].append(self)
+
+    def merge_all_of(self):
+        properties = {}
+        for definition in self.allOf:
+            for p in definition.properties:
+                properties[p.name] = p
+        properties = list(properties.values())
+        return Definition(
+            name=self.name,
+            type=self.type,
+            properties=properties,
+            relationships={property.ref_type for property in properties if property.ref_type}
+        )
+
+    @property
+    def uml(self):
+        d = self.merge_all_of()
+        return d.uml
+    
+    @property
+    def properties(self):
+        d = self.merge_all_of()
+        return d.properties
+    
+    @property
+    def relationships(self):
+        d = self.merge_all_of()
+        return d.relationships
+    
+class RefDefinition(Definition):
+    def __init__(self, name, type, ref_type):
+        self.name = name  # type: str
+        self.type = type  # type: str
+        self.ref_type = ref_type  # type: List[str]
+        Definition._all_definitions[name].append(self)
+
+    @property
+    def uml(self):
+        return Definition._all_definitions[self.ref_type][-1].uml
+    
+    @property
+    def properties(self):
+        return Definition._all_definitions[self.ref_type][-1].properties
+    
+    @property
+    def relationships(self):
+        return Definition._all_definitions[self.ref_type][-1].relationships
 
 class Parameter:
     def __init__(self, name, location, description, required, property):
@@ -376,6 +451,7 @@ class Swagger:
 
 
 if __name__ == '__main__':
-    input_file_name = sys.argv[1]
+    #input_file_name = sys.argv[1]
+    input_file_name = '/home/admin/dev/swagger_to_uml/fixture-v2.json'
     sw = Swagger.from_file(input_file_name)
     print(sw.uml, end='', flush=True)
